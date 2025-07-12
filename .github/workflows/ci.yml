@@ -10,3 +10,4 @@ jobs:
     - run: pip install ruff pytest
     - run: ruff check .
     - run: pytest -q
+

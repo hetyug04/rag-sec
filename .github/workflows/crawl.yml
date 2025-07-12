@@ -1,0 +1,27 @@
+name: crawl-sec
+on:
+  schedule:
+    - cron:  '0 3 * * *'        
+  workflow_dispatch:            
+
+jobs:
+  crawl:
+    runs-on: windows-latest
+    env:                      
+      R2_ENDPOINT:  ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET:    ${{ secrets.R2_BUCKET }}
+      R2_KEY:       ${{ secrets.R2_KEY }}
+      R2_SECRET:    ${{ secrets.R2_SECRET }}
+
+    steps:
+    - uses: actions/checkout@v4   
+    - uses: actions/setup-python@v5 
+      with:
+        python-version: '3.11'
+        cache: 'pip'              
+    - name: Install deps
+      run: |
+        pip install -r requirements.txt
+    - name: Run crawler (50 cos × 1 filing)
+      run: |
+        python -m rag_sec.crawl_sec --max_companies 50 --max_filings_per_type 1
