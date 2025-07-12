@@ -2,14 +2,15 @@ import argparse
 import os
 import sys
 
-# Import local modules
-from chunk import chunk_tokens
-
 import boto3
-from clean import html_to_text, tokenize
 from colbert import Indexer
 from colbert.infra import ColBERTConfig
 from tqdm import tqdm
+
+# --- CORRECTED IMPORTS ---
+# Use a dot (.) to specify a relative import from the same package
+from .chunk import chunk_tokens
+from .clean import html_to_text, tokenize
 
 
 def main():
