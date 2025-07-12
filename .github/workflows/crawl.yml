@@ -24,4 +24,4 @@ jobs:
         pip install -r requirements.txt
     - name: Run crawler (50 cos × 1 filing)
       run: |
-        python -m rag_sec.crawl_sec --max_companies 50 --max_filings_per_type 1
+        python -m modules/crawl_sec.py --max_companies 50 --max_filings_per_type 1
