@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -9,7 +10,14 @@ import aiofiles
 import boto3
 import dotenv
 import httpx
+from bs4 import BeautifulSoup
 
+# --- Configuration ---
+SEC_RSS_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=10-K%7C10-Q&owner=include&count=100&output=atom"
+TARGET_PREFIX = "sec/raw/"
+SIZE_LIMIT_GB = 2.0
+
+# --- Boto3 and User-Agent Setup ---
 s3 = boto3.client(
     "s3",
     endpoint_url=os.environ.get("R2_ENDPOINT"),
@@ -19,167 +27,216 @@ s3 = boto3.client(
 UA = {"User-Agent": "rag-sec bot <hetyug04@gmail.com>"}
 
 
-def load_company_tickers(file_path="company_tickers.json") -> list[dict]:
+def prune_bucket_if_needed(bucket: str, prefix: str, size_limit_gb: float):
     """
-    Loads company ticker data from the specified JSON file.
+    Checks the total size of objects under a prefix and deletes the oldest
+    files until the total size is under the specified limit.
     """
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            data = json.load(f)
-        return [v for k, v in data.items()]
-    except FileNotFoundError:
-        print(f"Error: The file {file_path} was not found.")
-        return []
-    except json.JSONDecodeError:
-        print(f"Error: Could not decode the JSON from {file_path}.")
-        return []
+    print("\n" + "-" * 60)
+    print(f"Checking storage size for prefix: s3://{bucket}/{prefix}")
+    size_limit_bytes = size_limit_gb * 1024**3
+
+    all_objects = []
+    total_size_bytes = 0
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        if "Contents" in page:
+            for obj in page["Contents"]:
+                all_objects.append(obj)
+                total_size_bytes += obj["Size"]
+
+    print(
+        f"Found {len(all_objects)} objects with a total size of "
+        f"{total_size_bytes / 1024**3:.2f} GB."
+    )
+
+    if total_size_bytes <= size_limit_bytes:
+        print("Storage size is within the limit. No action needed.")
+        return
+
+    print(f"Total size exceeds the {size_limit_gb} GB limit. Pruning oldest files...")
+    bytes_to_delete = total_size_bytes - size_limit_bytes
+    all_objects.sort(key=lambda x: x["LastModified"])
+
+    keys_to_delete = []
+    bytes_deleted = 0
+    for obj in all_objects:
+        if bytes_deleted < bytes_to_delete:
+            keys_to_delete.append({"Key": obj["Key"]})
+            bytes_deleted += obj["Size"]
+        else:
+            break
+
+    print(
+        f"Deleting {len(keys_to_delete)} files to free up {bytes_deleted / 1024**2:.2f} MB..."
+    )
+    for i in range(0, len(keys_to_delete), 1000):
+        delete_batch = keys_to_delete[i : i + 1000]
+        s3.delete_objects(
+            Bucket=bucket, Delete={"Objects": delete_batch, "Quiet": True}
+        )
+
+    print("Pruning complete.")
 
 
-async def fetch_and_store_filings(
-    company: dict,
+async def process_filing(
+    filing_info: dict,
     client: httpx.AsyncClient,
-    max_filings_per_type: int,
     log,
     bucket: str,
     sem: asyncio.Semaphore,
 ):
     """
-    Fetches, stores, and logs recent filings for a company,
-    respecting a semaphore to limit concurrency.
+    Fetches, stores, and logs a single filing discovered from the RSS feed.
     """
-    # CIK must be zero-padded to 10 digits
-    cik = str(company.get("cik_str", "")).zfill(10)
-    company_name = company.get("title", "N/A")
+    cik = filing_info["cik"]
+    acc_no = filing_info["accession_number"]
+    form_type = filing_info["form_type"]
+    filed_date = filing_info["filed_date"]
 
-    if not cik.isdigit():
-        print(f"Skipping {company_name} due to invalid CIK.")
-        return
+    async with sem:
+        print(f"Processing: {form_type} from CIK {cik} (Acc No: {acc_no})")
 
-    submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-
-    async with sem:  # Acquire semaphore before making a request
-        print(f"Processing: {company_name} (CIK: {cik})")
+        # Use the submissions API to get the primary document name
+        submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
         try:
             response = await client.get(submissions_url)
             response.raise_for_status()
             js = response.json()
         except httpx.HTTPStatusError as e:
-            print(f"  -> HTTP Error for {company_name}: {e.response.status_code}")
+            print(f"  -> HTTP Error for CIK {cik}: {e.response.status_code}")
             return
         except Exception as e:
-            print(f"  -> An unexpected error occurred for {company_name}: {e}")
+            print(f"  -> An unexpected error occurred for CIK {cik}: {e}")
             return
 
-    filings = js.get("filings", {}).get("recent", {})
-    forms = zip(
-        filings.get("form", []),
-        filings.get("accessionNumber", []),
-        filings.get("primaryDocument", []),
-        filings.get("filingDate", []),
-    )
+        # Find the specific filing by accession number to get the document name
+        primary_doc = None
+        try:
+            filings = js.get("filings", {}).get("recent", {})
+            acc_numbers = filings.get("accessionNumber", [])
+            doc_names = filings.get("primaryDocument", [])
+            for i, acc in enumerate(acc_numbers):
+                if acc == acc_no:
+                    primary_doc = doc_names[i]
+                    break
+        except (KeyError, IndexError):
+            print(f"  -> Could not find filing {acc_no} in JSON for CIK {cik}.")
+            return
 
-    filing_counts = {"10-K": 0, "10-Q": 0}
-    for form, acc, doc, date in forms:
-        if form not in ("10-K", "10-Q"):
+        if not primary_doc:
+            print(
+                f"  -> Filing {acc_no} not found in recent submissions for CIK {cik}."
+            )
+            return
+
+        key = f"{TARGET_PREFIX}{cik}/{acc_no}_{primary_doc}"
+
+        # Check if the object already exists before downloading
+        try:
+            s3.head_object(Bucket=bucket, Key=key)
+            print(f"  -> Already exists: s3://{bucket}/{key}")
+            return
+        except s3.exceptions.ClientError as e:
+            if e.response["ResponseMetadata"]["HTTPStatusCode"] != 404:
+                raise
+
+        # Construct the final document URL and download
+        doc_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no.replace('-', '')}/{primary_doc}"
+        html_content = (await client.get(doc_url)).text
+
+        # Upload to S3
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=html_content,
+            ContentType="text/html",
+            Metadata={"form": form_type, "filed": filed_date},
+        )
+        print(f"    -> Uploaded to S3 at s3://{bucket}/{key}")
+        log_message = {
+            "cik": cik,
+            "key": key,
+            "form": form_type,
+            "filed": filed_date,
+            "status": "ok",
+        }
+        await log.write(json.dumps(log_message) + "\n")
+        await asyncio.sleep(0.1)
+
+
+async def main(max_filings: int, bucket: str):
+    """
+    Main function to discover the latest filings from the SEC RSS feed,
+    process them concurrently, and then prune storage if necessary.
+    """
+    # 1. Fetch the latest filings from the SEC RSS feed
+    print("Fetching latest filings from SEC RSS feed...")
+    async with httpx.AsyncClient(headers=UA, timeout=30) as client:
+        try:
+            response = await client.get(SEC_RSS_URL)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "xml")
+            entries = soup.find_all("entry")
+        except httpx.HTTPStatusError as e:
+            print(f"Could not fetch SEC RSS feed. Error: {e.response.status_code}")
+            return
+
+    # 2. Parse feed entries to get filing metadata
+    filings_to_process = []
+    for entry in entries:
+        try:
+            # Extract CIK from title, e.g., "10-K - TESLA, INC. (0001318605) (Filer)"
+            cik_match = re.search(r"\((\d{10})\)", entry.title.text)
+            if not cik_match:
+                continue
+
+            filing_info = {
+                "cik": cik_match.group(1),
+                "accession_number": entry.id.text.split("=")[-1],
+                "form_type": entry.category["term"],
+                "filed_date": entry.updated.text,
+            }
+            filings_to_process.append(filing_info)
+        except (AttributeError, KeyError, IndexError):
+            print("  -> Skipping a malformed RSS entry.")
             continue
 
-        if (
-            filing_counts["10-K"] >= max_filings_per_type
-            and filing_counts["10-Q"] >= max_filings_per_type
-        ):
-            break
+    if not filings_to_process:
+        print("No new filings found in the RSS feed.")
+        return
 
-        if filing_counts.get(form, max_filings_per_type) < max_filings_per_type:
-            key = f"sec/raw/{cik}/{acc}_{doc}"
+    # 3. Process the discovered filings concurrently
+    filings_to_process = filings_to_process[:max_filings]
+    print(f"Discovered {len(filings_to_process)} new filings to process.")
+    print("-" * 60)
 
-            # Check if object already exists before downloading
-            try:
-                s3.head_object(Bucket=bucket, Key=key)
-                print(f"  -> Already exists: s3://{bucket}/{key}")
-                continue
-            except s3.exceptions.ClientError as e:
-                if e.response["ResponseMetadata"]["HTTPStatusCode"] != 404:
-                    raise  # Re-raise unexpected errors
-
-            filing_counts[form] += 1
-            print(f"  -> Found {form} filed on {date}. Accession No: {acc}")
-
-            doc_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{doc}"
-
-            async with sem:  # Acquire semaphore for each download
-                html_content = (await client.get(doc_url)).text
-
-            # S3 upload is blocking, but fast enough for this context
-            s3.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=html_content,
-                ContentType="text/html",
-                Metadata={"form": form, "filed": date},
-            )
-            print(f"    -> Uploaded to S3 at s3://{bucket}/{key}")
-            log_message = {
-                "cik": cik,
-                "key": key,
-                "form": form,
-                "filed": date,
-                "status": "ok",
-            }
-            await log.write(json.dumps(log_message) + "\n")
-
-            await asyncio.sleep(0.1)  # Be a good citizen
-
-
-async def main(max_companies: int, max_filings_per_type: int, bucket: str):
-    """
-    Main function to load companies and process their filings concurrently.
-    """
     log_path = Path("logs")
     log_path.mkdir(exist_ok=True)
     log_file_path = log_path / f"crawl_{datetime.now():%Y-%m-%d}.jsonl"
 
-    companies = load_company_tickers()
-    if not companies:
-        print("No company data found. Exiting.")
-        return
-
-    companies_to_process = companies[:max_companies]
-    print(f"Processing the first {len(companies_to_process)} companies.")
-    print("-" * 60)
-
-    # Create a semaphore to limit concurrent requests to SEC EDGAR
     sem = asyncio.Semaphore(10)
-
     async with aiofiles.open(log_file_path, mode="a") as log:
         async with httpx.AsyncClient(headers=UA, timeout=30) as client:
-            tasks = []
-            for company in companies_to_process:
-                task = fetch_and_store_filings(
-                    company, client, max_filings_per_type, log, bucket, sem
-                )
-                tasks.append(task)
+            tasks = [
+                process_filing(filing, client, log, bucket, sem)
+                for filing in filings_to_process
+            ]
             await asyncio.gather(*tasks)
+
+    # 4. After all crawling is done, check and prune the bucket
+    prune_bucket_if_needed(bucket, TARGET_PREFIX, SIZE_LIMIT_GB)
 
 
 if __name__ == "__main__":
     dotenv.load_dotenv()
-
-    p = argparse.ArgumentParser(
-        description="Fetch recent SEC filings and upload to an S3-compatible store."
-    )
+    p = argparse.ArgumentParser(description="Discover and fetch latest SEC filings.")
     p.add_argument(
-        "--max_companies",
+        "--max-filings",
         type=int,
-        default=50,
-        help="Max number of companies to process.",
+        default=100,
+        help="Max number of filings to process from the RSS feed.",
     )
-    p.add_argument(
-        "--max_filings_per_type",
-        type=int,
-        default=5,
-        help="Max number of 10-K/10-Q filings to retrieve per company.",
-    )
-    # Argument to pull bucket name from env var, making it configurable
     p.add_argument(
         "--R2_BUCKET",
         type=str,
@@ -188,10 +245,9 @@ if __name__ == "__main__":
     )
     args = p.parse_args()
 
-    # Ensure bucket is specified
     if not args.R2_BUCKET:
         raise ValueError(
-            "Bucket name must be provided via --R2_BUCKET argument or R2_BUCKET environment variable."
+            "Bucket name must be provided via --R2_BUCKET or R2_BUCKET env var."
         )
 
-    asyncio.run(main(args.max_companies, args.max_filings_per_type, args.R2_BUCKET))
+    asyncio.run(main(args.max_filings, args.R2_BUCKET))
