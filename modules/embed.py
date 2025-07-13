@@ -9,13 +9,13 @@ from colbert import Indexer
 from colbert.infra import ColBERTConfig
 from tqdm import tqdm
 
-# Import local modules
-from .chunk import chunk_tokens
-from .clean import html_to_markdown, tokenize
+# Import the new, more powerful cleaning and chunking functions
+from .chunk import chunk_text
+from .clean import html_to_markdown
 
 
 def main():
-    # --- 1. Argument Parsing ---
+    # ... (Argument parsing remains the same) ...
     p = argparse.ArgumentParser()
     p.add_argument(
         "--prefix", default="sec/raw/", help="Input prefix in R2 for raw HTML files."
@@ -39,20 +39,7 @@ def main():
     )
     args = p.parse_args()
 
-    if not all(
-        [
-            os.environ.get("R2_ENDPOINT"),
-            args.bucket,
-            os.environ.get("R2_KEY"),
-            os.environ.get("R2_SECRET"),
-        ]
-    ):
-        print(
-            "Error: R2 environment variables (ENDPOINT, BUCKET, KEY, SECRET) must be set."
-        )
-        sys.exit(1)
-
-    # --- 2. S3/R2 Client Setup ---
+    # --- S3 Client Setup ---
     s3 = boto3.client(
         "s3",
         endpoint_url=os.environ["R2_ENDPOINT"],
@@ -61,8 +48,9 @@ def main():
         config=Config(signature_version="s3v4"),
     )
 
-    # --- 3. Data Preparation ---
+    # --- Data Preparation ---
     print(f"Listing all objects from r2://{args.bucket}/{args.prefix}...")
+    # ... (Code to list objects and apply limit remains the same) ...
     all_objects = []
     paginator = s3.get_paginator("list_objects_v2")
     pages = paginator.paginate(Bucket=args.bucket, Prefix=args.prefix)
@@ -86,31 +74,23 @@ def main():
             .read()
             .decode("utf-8", "ignore")
         )
-        clean_text = html_to_markdown(html_content)
-        tokens = tokenize(clean_text)
-        for chunk in chunk_tokens(tokens):
+        # 1. Clean the HTML to Markdown
+        clean_markdown = html_to_markdown(html_content)
+        # 2. Chunk the clean text using the tokenizer
+        for chunk in chunk_text(clean_markdown):
             passages.append(chunk)
 
     if not passages:
-        print(
-            "Error: No passages found to embed. Check if the --prefix is correct and if files exist in the bucket."
-        )
+        print("Error: No passages were generated. Check cleaning and chunking logic.")
         return
 
-    # --- 4. ColBERT-v2 Embedding and Indexing ---
+    # --- ColBERT Indexing ---
     print(f"\nFound {len(passages)} passages. Configuring ColBERT indexer...")
-    # Let ColBERT use its default root directory for creating the index.
-    colbert_config = ColBERTConfig(
-        doc_maxlen=512,
-        nbits=2,
-    )
-
+    colbert_config = ColBERTConfig(doc_maxlen=512, nbits=2)
     indexer = Indexer(checkpoint="colbert-ir/colbertv2.0", config=colbert_config)
 
-    print("Indexing passages... (This will take a while on the GPU)")
+    print("Indexing passages...")
     indexer.index(name=args.index_name, collection=passages, overwrite=True)
-
-    print("Index created locally.")
 
     # --- 5. Upload Index Shards to R2 ---
     # FIX: Get the correct index path directly from the indexer object.

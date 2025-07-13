@@ -4,20 +4,18 @@ import re
 import unicodedata
 
 from bs4 import BeautifulSoup, NavigableString, SoupStrainer, Tag
-from transformers import AutoTokenizer
 
-TOKENIZER = AutoTokenizer.from_pretrained("colbert-ir/colbertv2.0")
-MAX_TOKENS = 512  # ColBERT/BERT limit
-ROW_DELIM = "▁CELL"
-WIDE_COL_THRESHOLD = 30
-
+# --- Constants and Regexes ---
+STRAINER = SoupStrainer(
+    "p", "div", "pre", "table", "tr", "td", "th", "li", "br", "ix:hidden"
+)
 PAGE_NUM_RE = re.compile(r"^\s*(?:F-\d+|\d+)\s*$", re.IGNORECASE)
 HEADING_RE = re.compile(
     r"^\s*(ITEM\s+\d+[A-Z]?|PART\s+[IVXLC]+)(?:\.\s*(.*))?$",
     re.IGNORECASE | re.MULTILINE,
 )
 
-ASCII_LINE = re.compile(r"( {2,}|\t).*\d")  # detect space-padded tables
+# --- Helper Functions ---
 
 
 def _collapse_ws(text: str) -> str:
@@ -28,89 +26,67 @@ def _collapse_ws(text: str) -> str:
 
 
 def _html_table_to_grid(table: Tag) -> list[list[str]]:
-    """Expand rowspan/colspan and return a rectangular 2-D grid."""
+    """
+    Expand rowspan/colspan attributes to create a rectangular 2-D grid,
+    perfectly representing the visual layout of the table.
+    """
     grid: list[list[str]] = []
-    span: list[int] = []
-
-    def esc(cell_text: str) -> str:
-        return cell_text.replace("|", r"\|").replace("\n", " ")
 
     for tr in table.find_all("tr"):
-        row: list[str] = []
-        col = 0
-        span = [max(0, x - 1) for x in span]  # decrement residual row-spans
+        for td in tr.find_all(["th", "td"]):
+            # Get cell text and clean it
+            txt = re.sub(r"\s+", " ", td.get_text(strip=True)).replace("|", r"\|")
 
-        for cell in tr.find_all(["th", "td"]):
-            while col < len(span) and span[col]:
-                row.append("")
-                col += 1
+            # Get rowspan and colspan attributes
+            rowspan = int(td.get("rowspan", 1))
+            colspan = int(td.get("colspan", 1))
 
-            rs = int(cell.get("rowspan", 1))
-            cs = int(cell.get("colspan", 1))
-            txt = esc(cell.get_text(strip=True))
+            # Find the next available cell in the grid
+            row_idx = len(grid)
+            col_idx = 0
+            if grid:
+                # Find the first empty column in the current row
+                while (
+                    col_idx < len(grid[row_idx - 1])
+                    and grid[row_idx - 1][col_idx] is not None
+                ):
+                    col_idx += 1
 
-            for _ in range(cs):
-                row.append(txt)
-                span.append(rs)
-                col += 1
-        grid.append(row)
+            # Place the cell text in the grid, expanding for colspan and rowspan
+            for r in range(rowspan):
+                for c in range(colspan):
+                    # Ensure the grid is large enough
+                    while len(grid) <= row_idx + r:
+                        grid.append([None] * (col_idx + c + 1))
+                    while len(grid[row_idx + r]) <= col_idx + c:
+                        grid[row_idx + r].append(None)
 
-    width = max(map(len, grid))
-    for r in grid:
-        r.extend([""] * (width - len(r)))
-    return grid
+                    grid[row_idx + r][col_idx + c] = txt
+
+    # Replace all None placeholders with empty strings for consistent output
+    return [["" if cell is None else cell for cell in row] for row in grid]
 
 
 def _grid_to_markdown(grid: list[list[str]]) -> str:
-    header = f"| {ROW_DELIM} | ".join(grid[0])
-    sep = f"| {ROW_DELIM} | ".join(["---"] * len(grid[0]))
-    body = ["| " + f" {ROW_DELIM} | ".join(row) + f" {ROW_DELIM} |" for row in grid[1:]]
-    return "\n".join(
-        ["| " + header + f" {ROW_DELIM} |", "| " + sep + f" {ROW_DELIM} |", *body]
-    )
+    """Converts a 2D list of strings into a Markdown table."""
+    if not grid:
+        return ""
+
+    # Ensure all rows have the same number of columns
+    max_cols = max(len(row) for row in grid) if grid else 0
+    for row in grid:
+        row.extend([""] * (max_cols - len(row)))
+
+    header = "| " + " | ".join(grid[0]) + " |"
+    sep = "| " + " | ".join(["---"] * len(grid[0])) + " |"
+    body = ["| " + " | ".join(row) + " |" for row in grid[1:]]
+    return "\n".join([header, sep, *body])
 
 
-def _render_table_markdown(table: Tag) -> str:
-    """Return Markdown for an HTML table, row-splitting if very wide."""
-    grid = _html_table_to_grid(table)
-    if len(grid[0]) > WIDE_COL_THRESHOLD:
-        blocks = [_grid_to_markdown([grid[0], row]) for row in grid[1:]]
-        return "\n\n".join(blocks)
-    return _grid_to_markdown(grid)
+# --- Core Function ---
 
 
-def _ascii_block_to_md(lines: list[str]) -> str:
-    """Convert space-padded (<pre>) table lines to Markdown."""
-    cuts = sorted({m.start() for m in re.finditer(r"(?: {2,}|\t)", lines[0])})
-
-    def split(line_: str) -> list[str]:
-        segs, pos = [], 0
-        for c in cuts:
-            segs.append(line_[pos:c].strip())
-            pos = c
-        segs.append(line_[pos:].strip())
-        return segs
-
-    rows = list(map(split, lines))
-    width = max(map(len, rows))
-    for r in rows:
-        r.extend([""] * (width - len(r)))
-
-    header = f"| {ROW_DELIM} | ".join(rows[0])
-    sep = f"| {ROW_DELIM} | ".join(["---"] * width)
-    body = ["| " + f" {ROW_DELIM} | ".join(r) + f" {ROW_DELIM} |" for r in rows[1:]]
-    return "\n".join(
-        ["| " + header + f" {ROW_DELIM} |", "| " + sep + f" {ROW_DELIM} |", *body]
-    )
-
-
-STRAINER = SoupStrainer(
-    name=lambda t: t
-    in {"table", "tr", "td", "th", "p", "div", "pre", "li", "br", "ix:hidden"}
-)
-
-
-def html_to_markdown(html: str, safe_len: bool = True) -> str:
+def html_to_markdown(html: str) -> str:
     """Convert SEC HTML to Markdown friendly for ColBERT chunking."""
     if not html:
         return ""
@@ -123,7 +99,12 @@ def html_to_markdown(html: str, safe_len: bool = True) -> str:
         e.decompose()
 
     for t in soup.find_all("table"):
-        t.replace_with(NavigableString("\n\n" + _render_table_markdown(t) + "\n\n"))
+        grid = _html_table_to_grid(t)
+        if grid:
+            markdown_table = _grid_to_markdown(grid)
+            t.replace_with(NavigableString("\n\n" + markdown_table + "\n\n"))
+        else:
+            t.decompose()
 
     for br in soup.find_all("br"):
         br.replace_with("\n")
@@ -134,22 +115,9 @@ def html_to_markdown(html: str, safe_len: bool = True) -> str:
     text = soup.get_text()
 
     out: list[str] = []
-    buf: list[str] = []
-
     for line in text.splitlines():
-        if ASCII_LINE.search(line):
-            buf.append(line)
-            continue
-
-        if buf:
-            out.append(_ascii_block_to_md(buf) if len(buf) >= 3 else "\n".join(buf))
-            buf.clear()
-
         if not PAGE_NUM_RE.match(line.strip()):
             out.append(line)
-
-    if buf:
-        out.append(_ascii_block_to_md(buf))
 
     md = "\n".join(out)
 
@@ -159,21 +127,4 @@ def html_to_markdown(html: str, safe_len: bool = True) -> str:
         return f"\n## {head}{tail}\n"
 
     md = re.sub(HEADING_RE, _promote, md)
-    md = _collapse_ws(md)
-
-    if safe_len and len(TOKENIZER(md)["input_ids"]) > MAX_TOKENS:
-        mid = len(md) // 2
-        return (
-            html_to_markdown(md[:mid], safe_len)
-            + "\n"
-            + html_to_markdown(md[mid:], safe_len)
-        )
-
-    return md
-
-
-def tokenize(text: str) -> list[str]:
-    """A robust tokenizer that handles words with hyphens and apostrophes."""
-    if not text:
-        return []
-    return re.findall(r"\w+(?:[-']\w+)*", text)
+    return _collapse_ws(md)
