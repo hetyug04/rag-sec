@@ -9,6 +9,11 @@ from botocore.exceptions import ClientError
 from colbert import Indexer
 from colbert.infra import ColBERTConfig
 from tqdm import tqdm
+from transformers import AutoTokenizer
+
+from modules.chunk import chunk_text
+
+TOKENIZER = AutoTokenizer.from_pretrained("colbert-ir/colbertv2.0")
 
 
 def main():
@@ -16,7 +21,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument(
         "--prefix",
-        default="sec/raw/",
+        default="sec/processed/",
         help="Input prefix in R2 for processed JSON files.",
     )
     p.add_argument(
@@ -74,7 +79,12 @@ def main():
             .decode("utf-8")
         )
         data = json.loads(json_content)
-        passages.extend(data["content"])
+        for doc in data["content"]:  # each element *should* be a chunk
+            wp_len = len(TOKENIZER(doc, add_special_tokens=False)["input_ids"])
+            if wp_len > 512:  # raw doc sneaked in
+                passages.extend(chunk_text(doc))  # re-chunk on the fly
+            else:
+                passages.append(doc)
 
     if not passages:
         print("Error: No passages were generated. Check cleaning and chunking logic.")

@@ -8,9 +8,7 @@ dotenv.load_dotenv()
 
 # --- Configuration ---
 BUCKET_NAME = os.environ.get("R2_BUCKET")  # Your bucket name
-PREFIX_TO_DELETE = (
-    ""  # Set to "" to delete everything, or e.g., "sec/raw/" to delete a folder
-)
+PREFIX_TO_DELETE = "sec/processed"  # Set to "" to delete everything, or e.g., "sec/raw/" to delete a folder
 
 # --- Boto3 Setup ---
 s3 = boto3.client(
