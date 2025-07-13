@@ -7,8 +7,7 @@ from colbert import Indexer
 from colbert.infra import ColBERTConfig
 from tqdm import tqdm
 
-# --- CORRECTED IMPORTS ---
-# Use a dot (.) to specify a relative import from the same package
+# Import local modules
 from .chunk import chunk_tokens
 from .clean import html_to_text, tokenize
 
@@ -29,6 +28,13 @@ def main():
         "--index-name",
         default="sec_filings_index",
         help="A name for the ColBERT index.",
+    )
+    # ADDED: New argument to limit the number of filings for testing.
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of filings to process for testing.",
     )
     args = p.parse_args()
 
@@ -54,33 +60,48 @@ def main():
     )
 
     # --- 3. Data Preparation ---
-    print("Gathering and chunking passages from R2...")
-    passages = []
+    print(f"Listing all objects from r2://{args.bucket}/{args.prefix}...")
+    all_objects = []
     paginator = s3.get_paginator("list_objects_v2")
     pages = paginator.paginate(Bucket=args.bucket, Prefix=args.prefix)
-    for page in tqdm(pages, desc="Listing pages"):
-        if "Contents" not in page:
-            continue
-        for obj in tqdm(page["Contents"], desc="Processing filings", leave=False):
-            html_content = (
-                s3.get_object(Bucket=args.bucket, Key=obj["Key"])["Body"]
-                .read()
-                .decode("utf-8", "ignore")
+    for page in pages:
+        if "Contents" in page:
+            # Filter out any "directory" objects
+            all_objects.extend(
+                [obj for obj in page["Contents"] if not obj["Key"].endswith("/")]
             )
-            clean_text = html_to_text(html_content)
-            tokens = tokenize(clean_text)
-            for chunk in chunk_tokens(tokens):
-                passages.append(chunk)
+
+    # MODIFIED: Apply the limit if the --limit argument is used.
+    if args.limit:
+        print(
+            f"Applying limit: processing the first {args.limit} of {len(all_objects)} filings."
+        )
+        all_objects = all_objects[: args.limit]
+
+    print(f"Gathering and chunking passages from {len(all_objects)} filings...")
+    passages = []
+    for obj in tqdm(all_objects, desc="Processing filings"):
+        html_content = (
+            s3.get_object(Bucket=args.bucket, Key=obj["Key"])["Body"]
+            .read()
+            .decode("utf-8", "ignore")
+        )
+        clean_text = html_to_text(html_content)
+        tokens = tokenize(clean_text)
+        for chunk in chunk_tokens(tokens):
+            passages.append(chunk)
 
     if not passages:
-        print("No passages found to embed. Exiting.")
+        print(
+            "Error: No passages found to embed. Check if the --prefix is correct and if files exist in the bucket."
+        )
         return
 
     # --- 4. ColBERT-v2 Embedding and Indexing ---
     print(f"\nFound {len(passages)} passages. Configuring ColBERT indexer...")
     colbert_config = ColBERTConfig(
-        nbits=2,  # Number of bits for compression. 2 bits is standard for ColBERTv2.
-        root="/content/colbert_indices/",  # Local path in Colab to store index parts
+        nbits=2,
+        root="/content/colbert_indices/",
     )
 
     indexer = Indexer(checkpoint="colbert-ir/colbertv2.0", config=colbert_config)
@@ -97,11 +118,8 @@ def main():
     for root, _, files in os.walk(local_index_path):
         for file_name in tqdm(files, desc="Uploading shards"):
             local_file_path = os.path.join(root, file_name)
-            # Create a relative path to maintain directory structure in R2
             relative_path = os.path.relpath(local_file_path, colbert_config.root)
-            r2_key = os.path.join(args.out, relative_path).replace(
-                "\\", "/"
-            )  # Use forward slashes
+            r2_key = os.path.join(args.out, relative_path).replace("\\", "/")
 
             s3.upload_file(local_file_path, args.bucket, r2_key)
 
