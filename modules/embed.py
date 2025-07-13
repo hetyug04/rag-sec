@@ -101,7 +101,7 @@ def main():
     print(f"\nFound {len(passages)} passages. Configuring ColBERT indexer...")
     # Let ColBERT use its default root directory for creating the index.
     colbert_config = ColBERTConfig(
-        doc_maxlen=2048,
+        doc_maxlen=512,
         nbits=2,
     )
 

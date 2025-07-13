@@ -2,7 +2,7 @@ from collections.abc import Iterator
 
 
 def chunk_tokens(
-    tokens: list[str], size: int = 2000, overlap: int = 200
+    tokens: list[str], size: int = 500, overlap: int = 50
 ) -> Iterator[str]:
     """
     Splits a list of tokens into overlapping chunks of a specified size.
