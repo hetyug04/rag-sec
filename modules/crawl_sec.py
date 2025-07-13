@@ -15,7 +15,7 @@ from modules.chunk import chunk_text
 from modules.clean import html_to_markdown
 
 # --- Configuration ---
-TARGET_PREFIX = "sec/processed/"
+TARGET_PREFIX = "sec/raw/"
 SIZE_LIMIT_GB = 2.0
 
 # --- Boto3 and User-Agent Setup ---
@@ -138,7 +138,7 @@ async def process_filing(
             )
             return
 
-        key = f"{TARGET_PREFIX}{cik}/{acc_no}_{os.path.splitext(primary_doc)[0]}.json"
+        key = f"{TARGET_PREFIX}{cik}/{acc_no}_{primary_doc}"
 
         try:
             s3.head_object(Bucket=bucket, Key=key)
@@ -167,7 +167,7 @@ async def process_filing(
 
         s3.put_object(
             Bucket=bucket,
-            Key=key,
+            Key=f"sec/processed/{cik}/{acc_no}_{os.path.splitext(primary_doc)[0]}.json",
             Body=json.dumps(
                 {
                     "content": chunks,

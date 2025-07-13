@@ -4,11 +4,11 @@ import os
 import sys
 
 import boto3
-import tqdm
 from botocore.client import Config
 from botocore.exceptions import ClientError
 from colbert import Indexer
 from colbert.infra import ColBERTConfig
+from tqdm import tqdm
 
 
 def main():
