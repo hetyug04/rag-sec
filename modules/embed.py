@@ -1,24 +1,23 @@
 import argparse
+import json
 import os
 import sys
 
 import boto3
+import tqdm
 from botocore.client import Config
 from botocore.exceptions import ClientError
 from colbert import Indexer
 from colbert.infra import ColBERTConfig
-from tqdm import tqdm
-
-# Import the new, more powerful cleaning and chunking functions
-from .chunk import chunk_text
-from .clean import html_to_markdown
 
 
 def main():
     # ... (Argument parsing remains the same) ...
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--prefix", default="sec/raw/", help="Input prefix in R2 for raw HTML files."
+        "--prefix",
+        default="sec/processed/",
+        help="Input prefix in R2 for processed JSON files.",
     )
     p.add_argument(
         "--out", default="embeddings/", help="Output prefix in R2 for index shards."
@@ -66,19 +65,16 @@ def main():
         )
         all_objects = all_objects[: args.limit]
 
-    print(f"Gathering and chunking passages from {len(all_objects)} filings...")
+    print(f"Gathering passages from {len(all_objects)} JSON files...")
     passages = []
-    for obj in tqdm(all_objects, desc="Processing filings"):
-        html_content = (
+    for obj in tqdm(all_objects, desc="Processing files"):
+        json_content = (
             s3.get_object(Bucket=args.bucket, Key=obj["Key"])["Body"]
             .read()
-            .decode("utf-8", "ignore")
+            .decode("utf-8")
         )
-        # 1. Clean the HTML to Markdown
-        clean_markdown = html_to_markdown(html_content)
-        # 2. Chunk the clean text using the tokenizer
-        for chunk in chunk_text(clean_markdown):
-            passages.append(chunk)
+        data = json.loads(json_content)
+        passages.extend(data["content"])
 
     if not passages:
         print("Error: No passages were generated. Check cleaning and chunking logic.")
