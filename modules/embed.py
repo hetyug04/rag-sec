@@ -1,8 +1,10 @@
 import argparse
 import os
 import sys
+import time
 
 import boto3
+from botocore.exceptions import ClientError
 from colbert import Indexer
 from colbert.infra import ColBERTConfig
 from tqdm import tqdm
@@ -19,7 +21,7 @@ def main():
         "--prefix", default="sec/raw/", help="Input prefix in R2 for raw HTML files."
     )
     p.add_argument(
-        "--out", default="embeddings/", help="Output prefix in R2 for index shards."
+        "--out", default="sec/embeddings/", help="Output prefix in R2 for index shards."
     )
     p.add_argument(
         "--bucket", default=os.environ.get("R2_BUCKET"), help="R2 bucket name."
@@ -121,8 +123,29 @@ def main():
             relative_path = os.path.relpath(local_file_path, colbert_config.root)
             r2_key = os.path.join(args.out, relative_path).replace("\\", "/")
 
-            s3.upload_file(local_file_path, args.bucket, r2_key)
+            try:
+                s3.upload_file(local_file_path, args.bucket, r2_key)
 
+                # ADDED: Verification step to confirm the upload was successful.
+                print(f"  -> Verifying upload of {r2_key}...")
+                time.sleep(1)  # Give R2 a moment to process the upload
+                s3.head_object(Bucket=args.bucket, Key=r2_key)
+                print(f"  -> Verification successful for {file_name}.")
+
+            except ClientError as e:
+                # This will now catch errors from both upload_file and head_object
+                error_code = e.response.get("Error", {}).get("Code")
+                if error_code == "404" or error_code == "NoSuchKey":
+                    print(
+                        f"\nFATAL ERROR: Verification failed for {file_name}. The file was not found in R2 after upload."
+                    )
+                else:
+                    print(f"\nERROR uploading or verifying {file_name}: {e}")
+
+                print(
+                    "Upload failed. Please check R2 bucket policy, token permissions, and network access."
+                )
+                sys.exit(1)
     print("\nDone. Index uploaded successfully.")
 
 
