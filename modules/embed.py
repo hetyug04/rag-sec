@@ -100,7 +100,10 @@ def main():
     # --- 4. ColBERT-v2 Embedding and Indexing ---
     print(f"\nFound {len(passages)} passages. Configuring ColBERT indexer...")
     # Let ColBERT use its default root directory for creating the index.
-    colbert_config = ColBERTConfig(nbits=2)
+    colbert_config = ColBERTConfig(
+        doc_maxlen=2048,
+        nbits=2,
+    )
 
     indexer = Indexer(checkpoint="colbert-ir/colbertv2.0", config=colbert_config)
 
