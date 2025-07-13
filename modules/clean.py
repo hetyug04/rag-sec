@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup, NavigableString, SoupStrainer, Tag
 
 # --- Constants and Regexes ---
 STRAINER = SoupStrainer(
-    ["p", "div", "pre", "table", "tr", "td", "th", "li", "br", "ix:hidden"]
+    "p", "div", "pre", "table", "tr", "td", "th", "li", "br", "ix:hidden"
 )
 PAGE_NUM_RE = re.compile(r"^\s*(?:F-\d+|\d+)\s*$", re.IGNORECASE)
 HEADING_RE = re.compile(
