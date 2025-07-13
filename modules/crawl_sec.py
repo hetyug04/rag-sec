@@ -11,9 +11,6 @@ import boto3
 import dotenv
 import httpx
 
-from modules.chunk import chunk_text
-from modules.clean import html_to_markdown
-
 # --- Configuration ---
 TARGET_PREFIX = "sec/raw/"
 SIZE_LIMIT_GB = 2.0
@@ -100,7 +97,7 @@ async def process_filing(
 
         # FIX: Pad the CIK with leading zeros to make it 10 digits long.
         padded_cik = cik.zfill(10)
-        submissions_url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
+        submissions_url = f"https://data.sec.gov/submissions/CIK{padded_cik}.html"
         print(f"  -> Fetching metadata from: {submissions_url}")
 
         try:
@@ -162,19 +159,12 @@ async def process_filing(
             )
             return
 
-        md = html_to_markdown(html_content)
-        chunks = list(chunk_text(md))
-
         s3.put_object(
             Bucket=bucket,
-            Key=f"sec/processed/{cik}/{acc_no}_{os.path.splitext(primary_doc)[0]}.json",
-            Body=json.dumps(
-                {
-                    "content": chunks,
-                    "metadata": {"form": form_type, "filed": filed_date},
-                }
-            ),
-            ContentType="application/json",
+            Key=key,
+            Body=html_content,
+            ContentType="text/html",
+            Metadata={"form": form_type, "filed": filed_date},
         )
         print(f"    -> SUCCESS: Uploaded to S3 at s3://{bucket}/{key}")
         log_message = {
@@ -237,7 +227,7 @@ async def main(max_filings: int, bucket: str):
                     break
 
             # Add a delay *after every request* to respect rate limits
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.12)
 
             # If the request was successful, parse the content
             if response.status_code == 200:
@@ -284,7 +274,7 @@ async def main(max_filings: int, bucket: str):
 
     log_path = Path("logs")
     log_path.mkdir(exist_ok=True)
-    log_file_path = log_path / f"crawl_{datetime.now():%Y-%m-%d}.jsonl"
+    log_file_path = log_path / f"crawl_{datetime.now():%Y-%m-%d}.html"
 
     sem = asyncio.Semaphore(8)  # Use a safe concurrency limit
     async with aiofiles.open(log_file_path, mode="a") as log:

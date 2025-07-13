@@ -16,7 +16,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument(
         "--prefix",
-        default="sec/processed/",
+        default="sec/raw/",
         help="Input prefix in R2 for processed JSON files.",
     )
     p.add_argument(
