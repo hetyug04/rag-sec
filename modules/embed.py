@@ -92,7 +92,7 @@ def main():
 
     # --- ColBERT Indexing ---
     print(f"\nFound {len(passages)} passages. Configuring ColBERT indexer...")
-    colbert_config = ColBERTConfig(doc_maxlen=512, nbits=2)
+    colbert_config = ColBERTConfig(doc_maxlen=512, nbits=1)
     indexer = Indexer(checkpoint="colbert-ir/colbertv2.0", config=colbert_config)
 
     print("Indexing passages...")
