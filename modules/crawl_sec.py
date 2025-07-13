@@ -11,8 +11,11 @@ import boto3
 import dotenv
 import httpx
 
+from modules.chunk import chunk_text
+from modules.clean import html_to_markdown
+
 # --- Configuration ---
-TARGET_PREFIX = "sec/raw/"
+TARGET_PREFIX = "sec/processed/"
 SIZE_LIMIT_GB = 2.0
 
 # --- Boto3 and User-Agent Setup ---
@@ -135,7 +138,7 @@ async def process_filing(
             )
             return
 
-        key = f"{TARGET_PREFIX}{cik}/{acc_no}_{primary_doc}"
+        key = f"{TARGET_PREFIX}{cik}/{acc_no}_{os.path.splitext(primary_doc)[0]}.json"
 
         try:
             s3.head_object(Bucket=bucket, Key=key)
@@ -159,12 +162,19 @@ async def process_filing(
             )
             return
 
+        md = html_to_markdown(html_content)
+        chunks = list(chunk_text(md))
+
         s3.put_object(
             Bucket=bucket,
             Key=key,
-            Body=html_content,
-            ContentType="text/html",
-            Metadata={"form": form_type, "filed": filed_date},
+            Body=json.dumps(
+                {
+                    "content": chunks,
+                    "metadata": {"form": form_type, "filed": filed_date},
+                }
+            ),
+            ContentType="application/json",
         )
         print(f"    -> SUCCESS: Uploaded to S3 at s3://{bucket}/{key}")
         log_message = {
