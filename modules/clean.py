@@ -171,12 +171,9 @@ def html_to_markdown(html: str, safe_len: bool = True) -> str:
 
     return md
 
-    import sys
-    from pathlib import Path
 
-    if len(sys.argv) < 3:
-        print("Usage: python clean.py <infile.htm> <outfile.md>")
-        sys.exit(1)
-
-    raw_html = Path(sys.argv[1]).read_text(encoding="utf-8", errors="ignore")
-    Path(sys.argv[2]).write_text(html_to_markdown(raw_html), encoding="utf-8")
+def tokenize(text: str) -> list[str]:
+    """A robust tokenizer that handles words with hyphens and apostrophes."""
+    if not text:
+        return []
+    return re.findall(r"\w+(?:[-']\w+)*", text)

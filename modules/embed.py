@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 # Import local modules
 from .chunk import chunk_tokens
-from .clean import html_to_text, tokenize
+from .clean import html_to_markdown, tokenize
 
 
 def main():
@@ -86,7 +86,7 @@ def main():
             .read()
             .decode("utf-8", "ignore")
         )
-        clean_text = html_to_text(html_content)
+        clean_text = html_to_markdown(html_content)
         tokens = tokenize(clean_text)
         for chunk in chunk_tokens(tokens):
             passages.append(chunk)
