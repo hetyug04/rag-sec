@@ -17,7 +17,7 @@ def main():
     # --- 1. Argument Parsing ---
     p = argparse.ArgumentParser()
     p.add_argument(
-        "--prefix", default="raw/", help="Input prefix in R2 for raw HTML files."
+        "--prefix", default="sec/raw/", help="Input prefix in R2 for raw HTML files."
     )
     p.add_argument(
         "--out", default="embeddings/", help="Output prefix in R2 for index shards."
